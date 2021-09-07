@@ -18,10 +18,10 @@ bool isGoodStaticAlignment(uint x) @safe @nogc nothrow pure
 }
 
 /**
- * Round an allocation size up to a given alignment
- */
+Returns: `n` rounded up to a multiple of alignment, which must be a power of 2.
+*/
 @safe @nogc nothrow pure
-size_t roundUpToAlignment(size_t n, uint alignment)
+package size_t roundUpToAlignment(size_t n, uint alignment)
 {
     import std.math.traits : isPowerOf2;
     assert(alignment.isPowerOf2);
@@ -31,6 +31,49 @@ size_t roundUpToAlignment(size_t n, uint alignment)
         : n;
     assert(result >= n);
     return result;
+}
+
+/**
+Aligns a pointer down to a specified alignment. The resulting pointer is less
+than or equal to the given pointer.
+*/
+@nogc nothrow pure
+package void* alignDownTo(void* ptr, uint alignment)
+{
+    import std.math.traits : isPowerOf2;
+    assert(alignment.isPowerOf2);
+    return cast(void*) (cast(size_t) ptr & ~(alignment - 1UL));
+}
+
+///
+@safe @nogc nothrow pure
+unittest
+{
+    assert(10.roundUpToAlignment(4) == 12);
+    assert(11.roundUpToAlignment(2) == 12);
+    assert(12.roundUpToAlignment(8) == 16);
+    assert(118.roundUpToAlignment(64) == 128);
+}
+
+/**
+Returns: `n` rounded down to a multiple of alignment, which must be a power of 2.
+*/
+@safe @nogc nothrow pure
+package size_t roundDownToAlignment(size_t n, uint alignment)
+{
+    import std.math.traits : isPowerOf2;
+    assert(alignment.isPowerOf2);
+    return n & ~size_t(alignment - 1);
+}
+
+///
+@safe @nogc nothrow pure
+unittest
+{
+    assert(10.roundDownToAlignment(4) == 8);
+    assert(11.roundDownToAlignment(2) == 10);
+    assert(12.roundDownToAlignment(8) == 8);
+    assert(63.roundDownToAlignment(64) == 0);
 }
 
 @nogc nothrow pure

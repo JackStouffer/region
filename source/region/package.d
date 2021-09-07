@@ -11,6 +11,7 @@
 module region;
 
 import std.traits;
+import std.typecons;
 import std.experimental.allocator.common;
 import std.experimental.allocator.building_blocks.null_allocator;
 import region.internal;
@@ -27,20 +28,18 @@ the store and the limits. One allocation entails rounding up the allocation
 size for alignment purposes, bumping the current pointer, and comparing it
 against the limit.
 
-If `ParentAllocator` is different from $(REF_ALTTEXT `NullAllocator`, NullAllocator, std,experimental,allocator,building_blocks,null_allocator), `Region`
-deallocates the chunk of memory during destruction.
+If `ParentAllocator` is different from `NullAllocator`, then this will deallocate
+the underlying memory in the destructor.
 
 The `minAlign` parameter establishes alignment. If $(D minAlign > 1), the
 sizes of all allocation requests are rounded up to a multiple of `minAlign`.
 Applications aiming at maximum speed may want to choose $(D minAlign = 1) and
 control alignment externally.
 */
-struct Region(ParentAllocator = NullAllocator, uint minAlign = platformAlignment)
+struct Region(ParentAllocator = NullAllocator, uint minAlign = platformAlignment, Flag!"growDownwards" growDownwards = No.growDownwards)
 {
     static assert(minAlign.isGoodStaticAlignment);
     static assert(ParentAllocator.alignment >= minAlign);
-
-    import std.typecons : Ternary;
 
     /**
     The _parent allocator. Depending on whether `ParentAllocator` holds state
@@ -64,6 +63,11 @@ struct Region(ParentAllocator = NullAllocator, uint minAlign = platformAlignment
         return cast(void*) roundUpToAlignment(cast(size_t) _begin, alignment);
     }
 
+    private void* roundedEnd() const pure nothrow @trusted @nogc
+    {
+        return cast(void*) roundDownToAlignment(cast(size_t) _end, alignment);
+    }
+
     /**
     Constructs a region backed by a user-provided store.
     Assumes the memory was allocated with `ParentAllocator`
@@ -81,7 +85,10 @@ struct Region(ParentAllocator = NullAllocator, uint minAlign = platformAlignment
     {
         _begin = store.ptr;
         _end = store.ptr + store.length;
-        _current = roundedBegin();
+        static if (growDownwards)
+            _current = roundedEnd();
+        else
+            _current = roundedBegin();
     }
 
     /// Ditto
@@ -138,8 +145,21 @@ struct Region(ParentAllocator = NullAllocator, uint minAlign = platformAlignment
     {
         const rounded = goodAllocSize(n);
         if (n == 0 || rounded < n || available < rounded) return null;
-        auto result = _current[0 .. n];
-        _current += rounded;
+
+        static if (growDownwards)
+        {
+            assert(available >= rounded);
+            auto result = (_current - rounded)[0 .. n];
+            assert(result.ptr >= _begin);
+            _current = result.ptr;
+            assert(owns(result) == Ternary.yes);
+        }
+        else
+        {
+            auto result = _current[0 .. n];
+            _current += rounded;
+        }
+
         return result;
     }
 
@@ -159,21 +179,34 @@ struct Region(ParentAllocator = NullAllocator, uint minAlign = platformAlignment
         const rounded = goodAllocSize(n);
         if (n == 0 || rounded < n || available < rounded) return null;
 
-        // Just bump the pointer to the next good allocation
-        auto newCurrent = _current.alignUpTo(a);
-        if (newCurrent < _current || newCurrent > _end)
-            return null;
-
-        auto save = _current;
-        _current = newCurrent;
-        auto result = allocate(n);
-        if (result.ptr)
+        static if (growDownwards)
         {
-            assert(result.length == n);
-            return result;
+            auto tmpCurrent = _current - rounded;
+            auto result = tmpCurrent.alignDownTo(a);
+            if (result <= tmpCurrent && result >= _begin)
+            {
+                _current = result;
+                return cast(void[]) result[0 .. n];
+            }
         }
-        // Failed, rollback
-        _current = save;
+        else
+        {
+            // Just bump the pointer to the next good allocation
+            auto newCurrent = _current.alignUpTo(a);
+            if (newCurrent < _current || newCurrent > _end)
+                return null;
+
+            auto save = _current;
+            _current = newCurrent;
+            auto result = allocate(n);
+            if (result.ptr)
+            {
+                assert(result.length == n);
+                return result;
+            }
+            // Failed, rollback
+            _current = save;
+        }
 
         return null;
     }
@@ -181,8 +214,16 @@ struct Region(ParentAllocator = NullAllocator, uint minAlign = platformAlignment
     /// Allocates and returns all memory available to this region.
     void[] allocateAll() pure nothrow @trusted @nogc
     {
-        auto result = _current[0 .. available];
-        _current = _end;
+        static if (growDownwards)
+        {
+            auto result = _begin[0 .. available];
+            _current = _begin;
+        }
+        else
+        {
+            auto result = _current[0 .. available];
+            _current = _end;
+        }
         return result;
     }
 
@@ -190,27 +231,30 @@ struct Region(ParentAllocator = NullAllocator, uint minAlign = platformAlignment
      * Expands an allocated block in place. Expansion will succeed only if the given
      * block was the last one allocated.
      */
-    bool expand(ref void[] b, size_t delta) pure nothrow @safe @nogc
+    static if (growDownwards == No.growDownwards)
     {
-        assert(owns(b) == Ternary.yes || b is null);
-        assert((() @trusted => b.ptr + b.length <= _current)() || b is null);
-        if (b is null || delta == 0) return delta == 0;
-        auto newLength = b.length + delta;
-        if ((() @trusted => _current < b.ptr + b.length + alignment)())
+        bool expand(ref void[] b, size_t delta) pure nothrow @safe @nogc
         {
-            immutable currentGoodSize = this.goodAllocSize(b.length);
-            immutable newGoodSize = this.goodAllocSize(newLength);
-            immutable goodDelta = newGoodSize - currentGoodSize;
-            // This was the last allocation! Allocate some more and we're done.
-            if (goodDelta == 0
-                || (() @trusted => allocate(goodDelta).length == goodDelta)())
+            assert(owns(b) == Ternary.yes || b is null);
+            assert((() @trusted => b.ptr + b.length <= _current)() || b is null);
+            if (b is null || delta == 0) return delta == 0;
+            auto newLength = b.length + delta;
+            if ((() @trusted => _current < b.ptr + b.length + alignment)())
             {
-                b = (() @trusted => b.ptr[0 .. newLength])();
-                assert((() @trusted => _current < b.ptr + b.length + alignment)());
-                return true;
+                immutable currentGoodSize = this.goodAllocSize(b.length);
+                immutable newGoodSize = this.goodAllocSize(newLength);
+                immutable goodDelta = newGoodSize - currentGoodSize;
+                // This was the last allocation! Allocate some more and we're done.
+                if (goodDelta == 0
+                    || (() @trusted => allocate(goodDelta).length == goodDelta)())
+                {
+                    b = (() @trusted => b.ptr[0 .. newLength])();
+                    assert((() @trusted => _current < b.ptr + b.length + alignment)());
+                    return true;
+                }
             }
+            return false;
         }
-        return false;
     }
 
     /**
@@ -218,7 +262,7 @@ struct Region(ParentAllocator = NullAllocator, uint minAlign = platformAlignment
     */
     bool deallocate(void[] b) pure nothrow @safe @nogc
     {
-        return false;
+        return true;
     }
 
     /**
@@ -229,7 +273,14 @@ struct Region(ParentAllocator = NullAllocator, uint minAlign = platformAlignment
      */
     bool deallocateAll() pure nothrow @system @nogc
     {
-        _current = roundedBegin();
+        static if (growDownwards)
+        {
+            _current = roundedEnd();
+        }
+        else
+        {
+            _current = roundedBegin();
+        }
         return true;
     }
 
@@ -299,7 +350,10 @@ struct Region(ParentAllocator = NullAllocator, uint minAlign = platformAlignment
      */
     Ternary empty() const pure nothrow @safe @nogc
     {
-        return Ternary(_current == roundedBegin());
+        static if (growDownwards)
+            return Ternary(_current == roundedEnd());
+        else
+            return Ternary(_current == roundedBegin());
     }
 
     /**
@@ -308,7 +362,14 @@ struct Region(ParentAllocator = NullAllocator, uint minAlign = platformAlignment
      */
     size_t available() const @safe pure nothrow @nogc
     {
-        return _end - _current;
+        static if (growDownwards)
+        {
+            return _current - _begin;
+        }
+        else
+        {
+            return _end - _current;
+        }
     }
 }
 
@@ -353,6 +414,59 @@ struct Region(ParentAllocator = NullAllocator, uint minAlign = platformAlignment
         assert((() nothrow @nogc => a.deallocate(c))());
         assert((() pure nothrow @safe @nogc => a.empty)() ==  Ternary.no);
     }
+
+    // Create a 64 KB region allocated with malloc
+    auto reg = Region!(Mallocator, Mallocator.alignment,
+        Yes.growDownwards)(1024 * 64);
+    testAlloc(reg);
+}
+
+@system nothrow @nogc unittest
+{
+    import std.experimental.allocator.mallocator : AlignedMallocator;
+    import std.typecons : Ternary;
+
+    ubyte[] buf = cast(ubyte[]) AlignedMallocator.instance.alignedAllocate(64, 64);
+    auto reg = Region!(NullAllocator, 64, Yes.growDownwards)(buf);
+    assert(reg.alignedAllocate(10, 32).length == 10);
+    assert(!reg.available);
+}
+
+@system nothrow @nogc unittest
+{
+    // test 'this(ubyte[] store)' constructed regions properly clean up
+    // their inner storage after destruction
+    import std.experimental.allocator.mallocator : Mallocator;
+
+    static shared struct LocalAllocator
+    {
+    nothrow @nogc:
+        enum alignment = Mallocator.alignment;
+        void[] buf;
+        bool deallocate(void[] b)
+        {
+            assert(buf.ptr == b.ptr && buf.length == b.length);
+            return true;
+        }
+
+        void[] allocate(size_t n)
+        {
+            return null;
+        }
+
+    }
+
+    enum bufLen = 10 * Mallocator.alignment;
+    void[] tmp = Mallocator.instance.allocate(bufLen);
+
+    LocalAllocator a;
+    a.buf = cast(typeof(a.buf)) tmp[1 .. $];
+
+    auto reg = Region!(LocalAllocator, Mallocator.alignment,
+        Yes.growDownwards)(cast(ubyte[]) a.buf);
+    reg.parent = a;
+
+    Mallocator.instance.deallocate(tmp);
 }
 
 @system unittest
