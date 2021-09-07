@@ -1,18 +1,25 @@
 /**
  * A whole bunch of functions from `std.experimental.allocator.common`
- * that were marked as `package`, so I needed to copy them over.
+ * that were marked as `package`, so I needed to copy them over. I make
+ * no guarantees as to their quality.
  */
 module region.internal;
 
 import std.traits;
 import std.experimental.allocator.common;
 
+/**
+ * Is x a power of 2?
+ */
 bool isGoodStaticAlignment(uint x) @safe @nogc nothrow pure
 {
     import std.math.traits : isPowerOf2;
     return x.isPowerOf2;
 }
 
+/**
+ * Round an allocation size up to a given alignment
+ */
 @safe @nogc nothrow pure
 size_t roundUpToAlignment(size_t n, uint alignment)
 {
@@ -49,7 +56,7 @@ bool alignedAt(T)(T* ptr, uint alignment)
     return cast(size_t) ptr % alignment == 0;
 }
 
-void testAllocator(alias make)()
+package void testAllocator(alias make)()
 {
     import std.conv : text;
     import std.math.traits : isPowerOf2;

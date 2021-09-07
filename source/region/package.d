@@ -1,20 +1,15 @@
 /**
+ * Region allocators for allocating short lived data or data which can be all be
+ * deallocated at once.
+ * 
  * Derived from `std.experimental.allocator.building_blocks.region`. Original code written by 
- * Andrei Alexandrescu, Eduard Staniloiu, Sebastian Wilzbach, Iain Buclaw, @jercaianu,
- * Steven Schveighoffer, Per Nordlöw, Vladimir Panteleev, @joakim-noah
- tsbockman
- s-ludwig
- RazvanN7
- redstar
- berni44
- Jacob Carlborg,
- davidlt
- dnadlinger
- Hackerpilot
+ * Andrei Alexandrescu, with contributions from Eduard Staniloiu, Sebastian Wilzbach, Iain Buclaw, @jercaianu,
+ * Steven Schveighoffer, Per Nordlöw, Vladimir Panteleev, @joakim-noah, @tsbockman,
+ * Sönke Ludwig, Razvan Nitu, Kai Nacke, @berni44, Jacob Carlborg, David Abdurachmanov,
+ * David Nadlinger, Brian Schott
  */
 module region;
 
-import std.stdio;
 import std.traits;
 import std.experimental.allocator.common;
 import std.experimental.allocator.building_blocks.null_allocator;
@@ -126,8 +121,8 @@ struct Region(ParentAllocator = NullAllocator, uint minAlign = platformAlignment
     }
 
     /**
-    Alignment offered.
-    */
+     * Alignment offered.
+     */
     alias alignment = minAlign;
 
     /**
@@ -219,17 +214,19 @@ struct Region(ParentAllocator = NullAllocator, uint minAlign = platformAlignment
     }
 
     /**
-        Does nothing.
+        Does nothing. Use `deallocateAll` instead.
     */
-    bool deallocate(void[] b) pure nothrow @system @nogc
+    bool deallocate(void[] b) pure nothrow @safe @nogc
     {
         return false;
     }
 
     /**
-        De-allocates all memory allocated by this region, which can be subsequently
-        reused for new allocations.
-    */
+     * Sets the `_current` data pointer back to `_begin`. All existing pointers
+     * and slices to memory owned by this allocator will still point to valid
+     * memory after this function is called, and can have their data change out
+     * from under them when more allocations occur. Therefore, this function is `@system`.
+     */
     bool deallocateAll() pure nothrow @system @nogc
     {
         _current = roundedBegin();
@@ -259,7 +256,7 @@ struct Region(ParentAllocator = NullAllocator, uint minAlign = platformAlignment
     {
         import core.stdc.string : memcpy;
 
-        // C standard says this is implementation defined. MAllocator deallocates
+        // C standard says this is implementation defined. Mallocator deallocates
         // and then sets the chunk to null, so follow that
         if (newSize == 0)
         {
@@ -273,7 +270,7 @@ struct Region(ParentAllocator = NullAllocator, uint minAlign = platformAlignment
             void[] newMem = allocate(newSize);
 
             if (b !is null)
-                memcpy(newMem.ptr, b.ptr, b.length);
+                memcpy(newMem.ptr, b.ptr, newSize);
 
             b = newMem;
             return true;
@@ -290,16 +287,16 @@ struct Region(ParentAllocator = NullAllocator, uint minAlign = platformAlignment
      * Returns:
      *     `true` if `b` has been allocated with this region, `false` otherwise.
      */
-    */
     Ternary owns(const void[] b) const pure nothrow @trusted @nogc
     {
         return Ternary(b && (&b[0] >= _begin) && (&b[0] + b.length <= _end));
     }
 
     /**
-    Returns `Ternary.yes` if no memory has been allocated in this region,
-    `Ternary.no` otherwise. (Never returns `Ternary.unknown`.)
-    */
+     * Returns:
+     *     `Ternary.yes` if no memory has been allocated in this region,
+     *     `Ternary.no` otherwise. (Never returns `Ternary.unknown`.)
+     */
     Ternary empty() const pure nothrow @safe @nogc
     {
         return Ternary(_current == roundedBegin());
@@ -380,7 +377,7 @@ struct Region(ParentAllocator = NullAllocator, uint minAlign = platformAlignment
 }
 
 // reallocate
-unittest
+nothrow @nogc unittest
 {
     import std.algorithm.comparison : equal;
     import std.range : repeat;
@@ -392,10 +389,14 @@ unittest
     assert(arr.length == 10);
     assert(reg._current - reg._begin == roundUpToAlignment(int.sizeof * 10, platformAlignment));
 
-    reg.expandArray(arr, repeat(20, 10));
+    immutable res = reg.expandArray(arr, repeat(20, 10));
+    assert(res);
     assert(arr.length == 20);
     assert(reg._current - reg._begin == roundUpToAlignment(int.sizeof * 30, platformAlignment));
-    assert(arr.equal(
-        [10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20]
-    ));
+
+    static immutable arr1 = [10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20];
+    assert(arr.equal(arr1));
+
+    immutable shouldFail = reg.expandArray(arr, 100_000);
+    assert(!shouldFail);
 }
