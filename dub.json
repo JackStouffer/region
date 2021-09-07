@@ -1,0 +1,9 @@
+{
+	"authors": [
+		"Jack Stouffer"
+	],
+	"copyright": "Copyright © 2021, Jack Stouffer",
+	"description": "A minimal D application.",
+	"license": "BSL 1.0",
+	"name": "region"
+}

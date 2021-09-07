@@ -1,0 +1,15 @@
+.dub
+docs.json
+__dummy.html
+docs/
+/region
+region.so
+region.dylib
+region.dll
+region.a
+region.lib
+region-test-*
+*.exe
+*.o
+*.obj
+*.lst
